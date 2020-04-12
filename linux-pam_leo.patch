@@ -1,0 +1,143 @@
+From 40bd2453e0974e68cbb6443648412aac37bbea0c Mon Sep 17 00:00:00 2001
+From: Leonardo Lai <leonardo.lai@live.com>
+Date: Sun, 15 Mar 2020 11:04:21 +0100
+Subject: added rlimit for cumulative sched_dl bandwidth
+
+added support for group cumulative bandwidth
+---
+ modules/pam_limits/limits.conf  |  3 ++
+ modules/pam_limits/pam_limits.c | 69 +++++++++++++++++++++++++++++----
+ 2 files changed, 65 insertions(+), 7 deletions(-)
+
+diff --git a/modules/pam_limits/limits.conf b/modules/pam_limits/limits.conf
+index fc2f23e..0842bf1 100644
+--- a/modules/pam_limits/limits.conf
++++ b/modules/pam_limits/limits.conf
+@@ -41,6 +41,9 @@
+ #	 - deadlinemin - min deadline for deadline scheduling policy (ns)
+ #	 - deadlinemax - max deadline for deadline scheduling policy (ns)
+ #	 - bandwidth - max bandwidth for deadline scheduling policy (millionths)
++#	 - cum_bandwidth - max cumulative bandwidth for deadline scheduling policy (millionths)
++#	 - group_cum_bw_gid - gid of group cumulative bandwidth for deadline scheduling policy (gid_t)
++#	 - group_cum_bandwidth - max group cumulative bandwidth for deadline scheduling policy (millionths)
+ #
+ #<domain>      <type>  <item>         <value>
+ #
+diff --git a/modules/pam_limits/pam_limits.c b/modules/pam_limits/pam_limits.c
+index 9e53447..9388c5d 100644
+--- a/modules/pam_limits/pam_limits.c
++++ b/modules/pam_limits/pam_limits.c
+@@ -65,13 +65,16 @@
+ 
+ /* XXX: overrides libc resource limit */
+ #undef RLIM_NLIMITS
+-#define RLIMIT_RUNTIME		16
+-#define RLIMIT_PERIOD_MIN	17
+-#define RLIMIT_PERIOD_MAX	18
+-#define RLIMIT_DEADLINE_MIN	19
+-#define RLIMIT_DEADLINE_MAX	20
+-#define RLIMIT_BANDWIDTH	21
+-#define RLIM_NLIMITS		22
++#define RLIMIT_RUNTIME			16
++#define RLIMIT_PERIOD_MIN		17
++#define RLIMIT_PERIOD_MAX		18
++#define RLIMIT_DEADLINE_MIN		19
++#define RLIMIT_DEADLINE_MAX		20
++#define RLIMIT_BANDWIDTH		21
++#define RLIMIT_CUM_BANDWIDTH 		22
++#define RLIMIT_GROUP_CUM_BW_GID 	23
++#define RLIMIT_GROUP_CUM_BANDWIDTH	24
++#define RLIM_NLIMITS			25
+ 
+ static const char *limits_def_names[] = {
+        "USER",
+@@ -250,6 +253,21 @@ rlimit2str (int i)
+   case RLIMIT_BANDWIDTH:
+     return "bandwidth";
+     break;
++#endif
++#ifdef RLIMIT_CUM_BANDWIDTH
++  case RLIMIT_CUM_BANDWIDTH:
++    return "cum_bandwidth";
++    break;
++#endif
++#ifdef RLIMIT_GROUP_CUM_BANDWIDTH
++  case RLIMIT_GROUP_CUM_BANDWIDTH:
++    return "group_cum_bandwidth";
++    break;
++#endif
++#ifdef RLIMIT_GROUP_CUM_BW_GID
++  case RLIMIT_GROUP_CUM_BW_GID:
++    return "group_cum_bw_gid";
++    break;
+ #endif
+   default:
+     return "UNKNOWN";
+@@ -398,6 +416,15 @@ static const char *lnames[RLIM_NLIMITS] = {
+ #ifdef RLIMIT_BANDWIDTH
+ 	[RLIMIT_BANDWIDTH] = "Max dl bandwidth",
+ #endif
++#ifdef RLIMIT_CUM_BANDWIDTH
++	[RLIMIT_CUM_BANDWIDTH] = "Max dl cumulative bandwidth",
++#endif
++#ifdef RLIMIT_GROUP_CUM_BANDWIDTH
++	[RLIMIT_GROUP_CUM_BANDWIDTH] = "Max dl group cumulative bandwidth",
++#endif
++#ifdef RLIMIT_GROUP_CUM_BW_GID
++	[RLIMIT_GROUP_CUM_BW_GID] = "GID of dl group cumulative bandwidth",
++#endif
+ };
+ 
+ static int str2rlimit(char *name) {
+@@ -627,6 +654,18 @@ process_limit (const pam_handle_t *pamh, int source, const char *lim_type,
+ #ifdef RLIMIT_BANDWIDTH
+     else if (strcmp(lim_item, "bandwidth") == 0)
+ 	limit_item = RLIMIT_BANDWIDTH;
++#endif
++#ifdef RLIMIT_CUM_BANDWIDTH
++    else if (strcmp(lim_item, "cum_bandwidth") == 0)
++	limit_item = RLIMIT_CUM_BANDWIDTH;
++#endif
++#ifdef RLIMIT_GROUP_CUM_BANDWIDTH
++    else if (strcmp(lim_item, "group_cum_bandwidth") == 0)
++	limit_item = RLIMIT_GROUP_CUM_BANDWIDTH;
++#endif
++#ifdef RLIMIT_GROUP_CUM_BW_GID
++    else if (strcmp(lim_item, "group_cum_bw_gid") == 0)
++	limit_item = RLIMIT_GROUP_CUM_BW_GID;
+ #endif
+     else if (strcmp(lim_item, "maxlogins") == 0) {
+ 	limit_item = LIMIT_LOGIN;
+@@ -689,6 +728,18 @@ process_limit (const pam_handle_t *pamh, int source, const char *lim_type,
+ 		}
+ 	}
+ 
++#if defined(RLIMIT_GROUP_CUM_BW_GID)
++    /* RLIMIT_GROUP_CUM_BW_GID and RLIMIT_GROUP_CUM_BANDWIDTH can
++     * not be applied to other domain than groups */
++    if ((source != LIMITS_DEF_GROUP)
++		&& ((limit_item == RLIMIT_GROUP_CUM_BW_GID)
++		  || (limit_item == RLIMIT_GROUP_CUM_BANDWIDTH))) {
++	    pam_syslog(pamh, LOG_DEBUG,
++			"group_cum_bw type is valid only for @ domain");
++	    return;
++    }
++#endif
++
+     /* one more special case when limiting logins */
+     if ((source == LIMITS_DEF_ALL || source == LIMITS_DEF_ALLGROUP)
+ 		&& (limit_item != LIMIT_LOGIN)) {
+@@ -1048,6 +1099,10 @@ static int setup_limits(pam_handle_t *pamh,
+ 	if ((i == RLIMIT_PERIOD_MIN || i == RLIMIT_DEADLINE_MIN) &&
+ 	   pl->limits[i].limit.rlim_cur < pl->limits[i].limit.rlim_max)
+             pl->limits[i].limit.rlim_cur = pl->limits[i].limit.rlim_max;
++#if defined(RLIMIT_GROUP_CUM_BW_GID)
++	else if (i == RLIMIT_GROUP_CUM_BW_GID)
++		; // no action to perform in this case
++#endif
+         else if ((i != RLIMIT_PERIOD_MIN && i != RLIMIT_DEADLINE_MIN) &&
+ 		pl->limits[i].limit.rlim_cur > pl->limits[i].limit.rlim_max)
+             pl->limits[i].limit.rlim_cur = pl->limits[i].limit.rlim_max;
+-- 
+2.17.1
+

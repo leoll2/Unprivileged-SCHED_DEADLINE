@@ -1,0 +1,149 @@
+diff --git a/modules/pam_limits/limits.conf b/modules/pam_limits/limits.conf
+index be621a7..fc2f23e 100644
+--- a/modules/pam_limits/limits.conf
++++ b/modules/pam_limits/limits.conf
+@@ -35,6 +35,12 @@
+ #        - msgqueue - max memory used by POSIX message queues (bytes)
+ #        - nice - max nice priority allowed to raise to values: [-20, 19]
+ #        - rtprio - max realtime priority
++#	 - runtime - max runtime for deadline scheduling policy (ns)
++#	 - periodmin - min period for deadline scheduling policy (ns)
++#	 - periodmax - max period for deadline scheduling policy (ns)
++#	 - deadlinemin - min deadline for deadline scheduling policy (ns)
++#	 - deadlinemax - max deadline for deadline scheduling policy (ns)
++#	 - bandwidth - max bandwidth for deadline scheduling policy (millionths)
+ #
+ #<domain>      <type>  <item>         <value>
+ #
+diff --git a/modules/pam_limits/pam_limits.c b/modules/pam_limits/pam_limits.c
+index cac3699..1fe575f 100644
+--- a/modules/pam_limits/pam_limits.c
++++ b/modules/pam_limits/pam_limits.c
+@@ -63,6 +63,16 @@
+ #define LIMIT_RANGE_MIN     2 /* only minimum uid/gid specified (min_uid:) */
+ #define LIMIT_RANGE_MM      3 /* both min and max uid/gid specified (min_uid:max_uid) */
+ 
++/* XXX: overrides libc resource limit */
++#undef RLIM_NLIMITS
++#define RLIMIT_RUNTIME		16
++#define RLIMIT_PERIOD_MIN	17
++#define RLIMIT_PERIOD_MAX	18
++#define RLIMIT_DEADLINE_MIN	19
++#define RLIMIT_DEADLINE_MAX	20
++#define RLIMIT_BANDWIDTH	21
++#define RLIM_NLIMITS		22
++
+ static const char *limits_def_names[] = {
+        "USER",
+        "GROUP",
+@@ -211,6 +221,36 @@ rlimit2str (int i)
+     return "rtprio";
+     break;
+ #endif
++#ifdef RLIMIT_RUNTIME
++  case RLIMIT_RUNTIME:
++    return "runtime";
++    break;
++#endif
++#ifdef RLIMIT_PERIOD_MIN
++  case RLIMIT_PERIOD_MIN:
++    return "periodmin";
++    break;
++#endif
++#ifdef RLIMIT_PERIOD_MAX
++  case RLIMIT_PERIOD_MAX:
++    return "periodmax";
++    break;
++#endif
++#ifdef RLIMIT_DEADLINE_MIN
++  case RLIMIT_DEADLINE_MIN:
++    return "deadlinemin";
++    break;
++#endif
++#ifdef RLIMIT_DEADLINE_MAX
++  case RLIMIT_DEADLINE_MAX:
++    return "deadlinemax";
++    break;
++#endif
++#ifdef RLIMIT_BANDWIDTH
++  case RLIMIT_BANDWIDTH:
++    return "bandwidth";
++    break;
++#endif
+   default:
+     return "UNKNOWN";
+     break;
+@@ -340,6 +380,24 @@ static const char *lnames[RLIM_NLIMITS] = {
+ #ifdef RLIMIT_RTTIME
+         [RLIMIT_RTTIME] = "Max realtime timeout",
+ #endif
++#ifdef RLIMIT_RUNTIME
++	[RLIMIT_RUNTIME] = "Max dl runtime",
++#endif
++#ifdef RLIMIT_PERIOD_MIN
++	[RLIMIT_PERIOD_MIN] = "Min dl period",
++#endif
++#ifdef RLIMIT_PERIOD_MAX
++	[RLIMIT_PERIOD_MAX] = "Max dl period",
++#endif
++#ifdef RLIMIT_DEADLINE_MIN
++	[RLIMIT_DEADLINE_MIN] = "Min dl deadline",
++#endif
++#ifdef RLIMIT_DEADLINE_MAX
++	[RLIMIT_DEADLINE_MAX] = "Max dl deadline",
++#endif
++#ifdef RLIMIT_BANDWIDTH
++	[RLIMIT_BANDWIDTH] = "Max dl bandwidth",
++#endif
+ };
+ 
+ static int str2rlimit(char *name) {
+@@ -546,6 +604,30 @@ process_limit (const pam_handle_t *pamh, int source, const char *lim_type,
+     else if (strcmp(lim_item, "rtprio") == 0)
+ 	limit_item = RLIMIT_RTPRIO;
+ #endif
++#ifdef RLIMIT_RUNTIME
++    else if (strcmp(lim_item, "runtime") == 0)
++	limit_item = RLIMIT_RUNTIME;
++#endif
++#ifdef RLIMIT_PERIOD_MIN
++    else if (strcmp(lim_item, "periodmin") == 0)
++	limit_item = RLIMIT_PERIOD_MIN;
++#endif
++#ifdef RLIMIT_PERIOD_MAX
++    else if (strcmp(lim_item, "periodmax") == 0)
++	limit_item = RLIMIT_PERIOD_MAX;
++#endif
++#ifdef RLIMIT_DEADLINE_MIN
++    else if (strcmp(lim_item, "deadlinemin") == 0)
++	limit_item = RLIMIT_DEADLINE_MIN;
++#endif
++#ifdef RLIMIT_DEADLINE_MAX
++    else if (strcmp(lim_item, "deadlinemax") == 0)
++	limit_item = RLIMIT_DEADLINE_MAX;
++#endif
++#ifdef RLIMIT_BANDWIDTH
++    else if (strcmp(lim_item, "bandwidth") == 0)
++	limit_item = RLIMIT_BANDWIDTH;
++#endif
+     else if (strcmp(lim_item, "maxlogins") == 0) {
+ 	limit_item = LIMIT_LOGIN;
+ 	pl->flag_numsyslogins = 0;
+@@ -962,8 +1044,17 @@ static int setup_limits(pam_handle_t *pamh,
+ 	    /* skip it if its not initialized */
+ 	    continue;
+ 	}
++#if defined(RLIMIT_PERIOD_MIN) && defined(RLIMIT_DEADLINE_MIN)
++	if ((i == RLIMIT_PERIOD_MIN || i == RLIMIT_DEADLINE_MIN) &&
++	   pl->limits[i].limit.rlim_cur < pl->limits[i].limit.rlim_max)
++            pl->limits[i].limit.rlim_cur = pl->limits[i].limit.rlim_max;
++        else if ((i != RLIMIT_PERIOD_MIN && i != RLIMIT_DEADLINE_MIN) &&
++		pl->limits[i].limit.rlim_cur > pl->limits[i].limit.rlim_max)
++            pl->limits[i].limit.rlim_cur = pl->limits[i].limit.rlim_max;
++#else
+         if (pl->limits[i].limit.rlim_cur > pl->limits[i].limit.rlim_max)
+             pl->limits[i].limit.rlim_cur = pl->limits[i].limit.rlim_max;
++#endif
+ 	res = setrlimit(i, &pl->limits[i].limit);
+ 	if (res != 0)
+ 	  pam_syslog(pamh, LOG_ERR, "Could not set limit for '%s': %m",
