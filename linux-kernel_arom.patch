@@ -1,0 +1,171 @@
+diff --git a/fs/proc/base.c b/fs/proc/base.c
+index ce3465479447..519d6f250a3d 100644
+--- a/fs/proc/base.c
++++ b/fs/proc/base.c
+@@ -562,6 +562,12 @@ static const struct limit_names lnames[RLIM_NLIMITS] = {
+ 	[RLIMIT_NICE] = {"Max nice priority", NULL},
+ 	[RLIMIT_RTPRIO] = {"Max realtime priority", NULL},
+ 	[RLIMIT_RTTIME] = {"Max realtime timeout", "us"},
++	[RLIMIT_RUNTIME] = {"Max runtime", "ns"},
++	[RLIMIT_PERIOD_MIN] = {"Min period", "ns"},
++	[RLIMIT_PERIOD_MAX] = {"Max period", "ns"},
++	[RLIMIT_DEADLINE_MIN] = {"Min deadline", "ns"},
++	[RLIMIT_DEADLINE_MAX] = {"Max deadline", "ns"},
++	[RLIMIT_BANDWIDTH] = {"Max bandwidth", "millionths"},
+ };
+ 
+ /* Display limits for a process */
+diff --git a/include/asm-generic/resource.h b/include/asm-generic/resource.h
+index 8874f681b056..6825a213d220 100644
+--- a/include/asm-generic/resource.h
++++ b/include/asm-generic/resource.h
+@@ -26,6 +26,12 @@
+ 	[RLIMIT_NICE]		= { 0, 0 },				\
+ 	[RLIMIT_RTPRIO]		= { 0, 0 },				\
+ 	[RLIMIT_RTTIME]		= {  RLIM_INFINITY,  RLIM_INFINITY },	\
++	[RLIMIT_RUNTIME]	= { 0, 0 },				\
++	[RLIMIT_PERIOD_MIN]	= {  RLIM_INFINITY,  RLIM_INFINITY },	\
++	[RLIMIT_PERIOD_MAX]	= { 0, 0 },				\
++	[RLIMIT_DEADLINE_MIN]	= {  RLIM_INFINITY,  RLIM_INFINITY },	\
++	[RLIMIT_DEADLINE_MAX]	= { 0, 0 },				\
++	[RLIMIT_BANDWIDTH]	= { 0, 0 },				\
+ }
+ 
+ #endif
+diff --git a/include/uapi/asm-generic/resource.h b/include/uapi/asm-generic/resource.h
+index f12db7a0da64..07f9339ab430 100644
+--- a/include/uapi/asm-generic/resource.h
++++ b/include/uapi/asm-generic/resource.h
+@@ -46,7 +46,13 @@
+ 					   0-39 for nice level 19 .. -20 */
+ #define RLIMIT_RTPRIO		14	/* maximum realtime priority */
+ #define RLIMIT_RTTIME		15	/* timeout for RT tasks in us */
+-#define RLIM_NLIMITS		16
++#define RLIMIT_RUNTIME		16	/* maximum runtime for dl tasks in ns */
++#define RLIMIT_PERIOD_MIN	17	/* minimum period for dl tasks in ns */
++#define RLIMIT_PERIOD_MAX	18	/* maximum period for dl tasks in ns */
++#define RLIMIT_DEADLINE_MIN	19	/* minimum deadline for dl tasks in ns */
++#define RLIMIT_DEADLINE_MAX	20	/* maximum deadline for dl tasks in ns */
++#define RLIMIT_BANDWIDTH	21	/* max bandwidth for dl tasks (millionths) */
++#define RLIM_NLIMITS		22
+ 
+ /*
+  * SuS says limits have to be unsigned.
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index f12225f26b70..b0315695efe4 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -4184,8 +4184,76 @@ static int __sched_setscheduler(struct task_struct *p,
+ 		  * unprivileged DL tasks to increase their relative deadline
+ 		  * or reduce their runtime (both ways reducing utilization)
+ 		  */
+-		if (dl_policy(policy))
+-			return -EPERM;
++		if (dl_policy(policy)) {
++			printk("In __sched_setscheduler\n");
++			unsigned long rlim_runtime =
++				task_rlimit(p, RLIMIT_RUNTIME);
++			unsigned long rlim_period_min =
++				task_rlimit(p, RLIMIT_PERIOD_MIN);
++			unsigned long rlim_period_max =
++				task_rlimit(p, RLIMIT_PERIOD_MAX);
++			unsigned long rlim_deadline_min =
++				task_rlimit(p, RLIMIT_DEADLINE_MIN);
++			unsigned long rlim_deadline_max =
++				task_rlimit(p, RLIMIT_DEADLINE_MAX);
++			unsigned long rlim_bandwidth =
++				task_rlimit(p, RLIMIT_BANDWIDTH);
++
++			u64 new_runtime = attr->sched_runtime;
++			u64 new_period = attr->sched_period ?:
++						attr->sched_deadline;
++			u64 new_deadline = attr->sched_deadline;
++			u64 new_bw = to_ratio(new_period, new_runtime);
++
++			if (task_has_dl_policy(p)) {
++				struct sched_dl_entity *dl_se = &p->dl;
++				u64 old_runtime = dl_se->dl_runtime;
++				u64 old_deadline = dl_se->dl_deadline;
++				u64 old_period = dl_se->dl_period;
++
++				/* Check runtime: */
++				if (new_runtime > old_runtime &&
++				    new_runtime > rlim_runtime) {
++					printk("Invalid runtime\n");
++					return -EPERM;
++				}
++
++				/* Check deadline range: */
++				if ((new_deadline > old_deadline &&
++				    new_deadline > rlim_deadline_max) ||
++				    (new_deadline < old_deadline &&
++				    new_deadline < rlim_deadline_min)) {
++					printk("Invalid deadline\n");
++					return -EPERM;
++				}
++
++				/* Check period range: */
++				if ((new_period > old_period &&
++				    new_period > rlim_period_max) ||
++				    (new_period < old_period &&
++				    new_period < rlim_period_min)) {
++					printk("Invalid period\n");
++					return -EPERM;
++				}
++
++				/* Check bandwidth: */
++				u64 old_bw = to_ratio(old_period, old_runtime);
++				if (new_bw > old_bw &&
++				    new_bw > rlim_bandwidth) {
++					printk("Invalid bandwidth\n");
++					return -EPERM;
++				}
++			}
++			else if (new_runtime > rlim_runtime ||
++				 new_period < rlim_period_min ||
++				 new_period > rlim_period_max ||
++				 new_deadline < rlim_deadline_min ||
++				 new_deadline > rlim_deadline_max ||
++				 new_bw > rlim_bandwidth) {
++				printk("Limits exceeded\n");
++				return -EPERM;
++			}
++		}
+ 
+ 		/*
+ 		 * Treat SCHED_IDLE as nice 20. Only allow a switch to
+diff --git a/kernel/sys.c b/kernel/sys.c
+index 123bd73046ec..5fa433d101db 100644
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -1529,7 +1529,13 @@ int do_prlimit(struct task_struct *tsk, unsigned int resource,
+ 	if (resource >= RLIM_NLIMITS)
+ 		return -EINVAL;
+ 	if (new_rlim) {
+-		if (new_rlim->rlim_cur > new_rlim->rlim_max)
++		if ((resource == RLIMIT_PERIOD_MIN ||
++		    resource == RLIMIT_DEADLINE_MIN) &&
++		    new_rlim->rlim_cur < new_rlim->rlim_max)
++			return -EINVAL;
++		if ((resource != RLIMIT_PERIOD_MIN &&
++		    resource != RLIMIT_DEADLINE_MIN) &&
++		    new_rlim->rlim_cur > new_rlim->rlim_max)
+ 			return -EINVAL;
+ 		if (resource == RLIMIT_NOFILE &&
+ 				new_rlim->rlim_max > sysctl_nr_open)
+@@ -1548,7 +1554,14 @@ int do_prlimit(struct task_struct *tsk, unsigned int resource,
+ 	if (new_rlim) {
+ 		/* Keep the capable check against init_user_ns until
+ 		   cgroups can contain all limits */
+-		if (new_rlim->rlim_max > rlim->rlim_max &&
++		if ((resource == RLIMIT_PERIOD_MIN ||
++		    resource == RLIMIT_DEADLINE_MIN) &&
++		    new_rlim->rlim_max < rlim->rlim_max &&
++		    !capable(CAP_SYS_RESOURCE))
++			retval = -EPERM;
++		else if ((resource != RLIMIT_PERIOD_MIN &&
++			 resource != RLIMIT_DEADLINE_MIN) &&
++			 new_rlim->rlim_max > rlim->rlim_max &&
+ 				!capable(CAP_SYS_RESOURCE))
+ 			retval = -EPERM;
+ 		if (!retval)

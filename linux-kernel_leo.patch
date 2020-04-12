@@ -1,0 +1,869 @@
+From 66f5cf3ea28d6fc8949404cd91366f15f9dfbd5a Mon Sep 17 00:00:00 2001
+From: Leonardo Lai <leonardo.lai@live.com>
+Date: Fri, 13 Mar 2020 18:31:07 +0100
+Subject: defined new rlimit for cumulative bandwdth for dl tasks
+
+new Kconfig option to enable/disable unpriv SCHEDDL features
+
+new implementation for groups
+---
+ fs/proc/base.c                      |   5 +
+ include/asm-generic/resource.h      |  39 +++-
+ include/linux/sched/deadline.h      |  36 +++-
+ include/uapi/asm-generic/resource.h |  10 +-
+ kernel/exit.c                       |  13 ++
+ kernel/sched/core.c                 | 284 ++++++++++++++++++++++------
+ kernel/sched/deadline.c             | 141 ++++++++++++++
+ kernel/sys.c                        |  51 ++++-
+ security/Kconfig                    |  15 ++
+ 9 files changed, 514 insertions(+), 80 deletions(-)
+
+diff --git a/fs/proc/base.c b/fs/proc/base.c
+index 7493f8b5d..6b39a12bc 100644
+--- a/fs/proc/base.c
++++ b/fs/proc/base.c
+@@ -578,12 +578,17 @@ static const struct limit_names lnames[RLIM_NLIMITS] = {
+ 	[RLIMIT_NICE] = {"Max nice priority", NULL},
+ 	[RLIMIT_RTPRIO] = {"Max realtime priority", NULL},
+ 	[RLIMIT_RTTIME] = {"Max realtime timeout", "us"},
++#ifdef CONFIG_SCHED_DEADLINE_UNPRIV
+ 	[RLIMIT_RUNTIME] = {"Max runtime", "ns"},
+ 	[RLIMIT_PERIOD_MIN] = {"Min period", "ns"},
+ 	[RLIMIT_PERIOD_MAX] = {"Max period", "ns"},
+ 	[RLIMIT_DEADLINE_MIN] = {"Min deadline", "ns"},
+ 	[RLIMIT_DEADLINE_MAX] = {"Max deadline", "ns"},
+ 	[RLIMIT_BANDWIDTH] = {"Max bandwidth", "millionths"},
++	[RLIMIT_CUM_BANDWIDTH] = {"Max cumulative bandwidth", "millionths"},
++	[RLIMIT_GROUP_CUM_BW_GID] = {"GID of group cumulative bandwidth", "gid_t"},
++	[RLIMIT_GROUP_CUM_BANDWIDTH] = {"Max group cumulative bandwidth", "millionths"},
++#endif	/* CONFIG_SCHED_DEADLINE_UNPRIV */
+ };
+ 
+ /* Display limits for a process */
+diff --git a/include/asm-generic/resource.h b/include/asm-generic/resource.h
+index 6825a213d..588bc6246 100644
+--- a/include/asm-generic/resource.h
++++ b/include/asm-generic/resource.h
+@@ -8,6 +8,7 @@
+ /*
+  * boot-time rlimit defaults for the init task:
+  */
++#ifdef CONFIG_SCHED_DEADLINE_UNPRIV
+ #define INIT_RLIMITS							\
+ {									\
+ 	[RLIMIT_CPU]		= {  RLIM_INFINITY,  RLIM_INFINITY },	\
+@@ -21,17 +22,41 @@
+ 	[RLIMIT_MEMLOCK]	= {    MLOCK_LIMIT,    MLOCK_LIMIT },	\
+ 	[RLIMIT_AS]		= {  RLIM_INFINITY,  RLIM_INFINITY },	\
+ 	[RLIMIT_LOCKS]		= {  RLIM_INFINITY,  RLIM_INFINITY },	\
+-	[RLIMIT_SIGPENDING]	= { 		0,	       0 },	\
++	[RLIMIT_SIGPENDING]	= {              0,              0 },	\
+ 	[RLIMIT_MSGQUEUE]	= {   MQ_BYTES_MAX,   MQ_BYTES_MAX },	\
+-	[RLIMIT_NICE]		= { 0, 0 },				\
+-	[RLIMIT_RTPRIO]		= { 0, 0 },				\
++	[RLIMIT_NICE]		= {              0,              0 },	\
++	[RLIMIT_RTPRIO]		= {              0,              0 },	\
+ 	[RLIMIT_RTTIME]		= {  RLIM_INFINITY,  RLIM_INFINITY },	\
+-	[RLIMIT_RUNTIME]	= { 0, 0 },				\
++	[RLIMIT_RUNTIME]	= {              0,              0 },	\
+ 	[RLIMIT_PERIOD_MIN]	= {  RLIM_INFINITY,  RLIM_INFINITY },	\
+-	[RLIMIT_PERIOD_MAX]	= { 0, 0 },				\
++	[RLIMIT_PERIOD_MAX]	= {              0,              0 },	\
+ 	[RLIMIT_DEADLINE_MIN]	= {  RLIM_INFINITY,  RLIM_INFINITY },	\
+-	[RLIMIT_DEADLINE_MAX]	= { 0, 0 },				\
+-	[RLIMIT_BANDWIDTH]	= { 0, 0 },				\
++	[RLIMIT_DEADLINE_MAX]	= {              0,              0 },	\
++	[RLIMIT_BANDWIDTH]	= {              0,              0 },	\
++	[RLIMIT_CUM_BANDWIDTH]	= {              0,              0 },	\
++	[RLIMIT_GROUP_CUM_BW_GID] = {            0,              0 },	\
++	[RLIMIT_GROUP_CUM_BANDWIDTH] = {         0,              0 },	\
+ }
++#else
++#define INIT_RLIMITS							\
++{									\
++	[RLIMIT_CPU]		= {  RLIM_INFINITY,  RLIM_INFINITY },	\
++	[RLIMIT_FSIZE]		= {  RLIM_INFINITY,  RLIM_INFINITY },	\
++	[RLIMIT_DATA]		= {  RLIM_INFINITY,  RLIM_INFINITY },	\
++	[RLIMIT_STACK]		= {       _STK_LIM,  RLIM_INFINITY },	\
++	[RLIMIT_CORE]		= {              0,  RLIM_INFINITY },	\
++	[RLIMIT_RSS]		= {  RLIM_INFINITY,  RLIM_INFINITY },	\
++	[RLIMIT_NPROC]		= {              0,              0 },	\
++	[RLIMIT_NOFILE]		= {   INR_OPEN_CUR,   INR_OPEN_MAX },	\
++	[RLIMIT_MEMLOCK]	= {    MLOCK_LIMIT,    MLOCK_LIMIT },	\
++	[RLIMIT_AS]		= {  RLIM_INFINITY,  RLIM_INFINITY },	\
++	[RLIMIT_LOCKS]		= {  RLIM_INFINITY,  RLIM_INFINITY },	\
++	[RLIMIT_SIGPENDING]	= {              0,              0 },	\
++	[RLIMIT_MSGQUEUE]	= {   MQ_BYTES_MAX,   MQ_BYTES_MAX },	\
++	[RLIMIT_NICE]		= {              0,              0 },	\
++	[RLIMIT_RTPRIO]		= {              0,              0 },	\
++	[RLIMIT_RTTIME]		= {  RLIM_INFINITY,  RLIM_INFINITY },	\
++}
++#endif	/* CONFIG_SCHED_DEADLINE_UNPRIV */
+ 
+ #endif
+diff --git a/include/linux/sched/deadline.h b/include/linux/sched/deadline.h
+index 1aff00b65..658f994d9 100644
+--- a/include/linux/sched/deadline.h
++++ b/include/linux/sched/deadline.h
+@@ -6,7 +6,13 @@
+  * NORMAL/BATCH tasks.
+  */
+ 
+-#define MAX_DL_PRIO		0
++#include <linux/radix-tree.h>
++
++#define MAX_DL_PRIO 0
++#ifdef CONFIG_SCHED_DEADLINE_UNPRIV
++#define DL_USER_BW_TYPE 0
++#define DL_GROUP_BW_TYPE 1
++#endif	/* CONFIG_SCHED_DEADLINE_UNPRIV */
+ 
+ static inline int dl_prio(int prio)
+ {
+@@ -25,6 +31,34 @@ static inline bool dl_time_before(u64 a, u64 b)
+ 	return (s64)(a - b) < 0;
+ }
+ 
++#ifdef CONFIG_SCHED_DEADLINE_UNPRIV
++/**
++ * struct dl_domain_cum_bw - domain cumulative bandwidth
++ * @ used:      Current bandwidth assigned to domain tasks (millionths)
++ */
++struct dl_domain_cum_bw {
++	u64 used;       // currently in-use
++	u64 reserved;   // max
++};
++
++/* Data structures to store the domains cumulative bandwidth */
++extern struct radix_tree_root dl_user_cum_bw_tree;
++extern struct radix_tree_root dl_group_cum_bw_tree;
++extern struct mutex dl_user_cum_bw_tree_mtx;
++extern struct mutex dl_group_cum_bw_tree_mtx;
++
++/* Functions to manipulate the cumulative bandwidth data structures */
++extern int dl_get_domain_bw(int dtype, unsigned int id,
++			    struct dl_domain_cum_bw *ret);
++extern int dl_set_domain_bw_lim(int dtype, unsigned int id, u64 bw_lim);
++extern int dl_add_domain_bw(int dtype, unsigned int id, u64 bw);
++extern int dl_sub_domain_bw(int dtype, unsigned int id, u64 bw);
++
++/* Function to reserve/release domains dl bandwidth */
++extern int try_reserve_bw(const struct cred *cred, u64 bw, u64 bw_lim);
++extern void reclaim_bw(const struct cred *cred, u64 bw);
++#endif	/* CONFIG_SCHED_DEADLINE_UNPRIV */
++
+ #ifdef CONFIG_SMP
+ 
+ struct root_domain;
+diff --git a/include/uapi/asm-generic/resource.h b/include/uapi/asm-generic/resource.h
+index 07f9339ab..40562c8f4 100644
+--- a/include/uapi/asm-generic/resource.h
++++ b/include/uapi/asm-generic/resource.h
+@@ -46,13 +46,21 @@
+ 					   0-39 for nice level 19 .. -20 */
+ #define RLIMIT_RTPRIO		14	/* maximum realtime priority */
+ #define RLIMIT_RTTIME		15	/* timeout for RT tasks in us */
++
++#ifndef CONFIG_SCHED_DEADLINE_UNPRIV
++#define RLIM_NLIMITS		16
++#else
+ #define RLIMIT_RUNTIME		16	/* maximum runtime for dl tasks in ns */
+ #define RLIMIT_PERIOD_MIN	17	/* minimum period for dl tasks in ns */
+ #define RLIMIT_PERIOD_MAX	18	/* maximum period for dl tasks in ns */
+ #define RLIMIT_DEADLINE_MIN	19	/* minimum deadline for dl tasks in ns */
+ #define RLIMIT_DEADLINE_MAX	20	/* maximum deadline for dl tasks in ns */
+ #define RLIMIT_BANDWIDTH	21	/* max bandwidth for dl tasks (millionths) */
+-#define RLIM_NLIMITS		22
++#define RLIMIT_CUM_BANDWIDTH 	22	/* max cumulative bandwidth for dl tasks (millionths) */
++#define RLIMIT_GROUP_CUM_BW_GID 23	/* GID of group cumulative bandwidth for dl tasks (gid_t) */
++#define RLIMIT_GROUP_CUM_BANDWIDTH 24	/* max group cumulative bandwidth for dl tasks (millionths) */
++#define RLIM_NLIMITS		25
++#endif	/* CONFIG_SCHED_DEADLINE_UNPRIV */
+ 
+ /*
+  * SuS says limits have to be unsigned.
+diff --git a/kernel/exit.c b/kernel/exit.c
+index 2833ffb0c..e90270d9b 100644
+--- a/kernel/exit.c
++++ b/kernel/exit.c
+@@ -13,6 +13,7 @@
+ #include <linux/sched/task.h>
+ #include <linux/sched/task_stack.h>
+ #include <linux/sched/cputime.h>
++#include <linux/sched/deadline.h>
+ #include <linux/interrupt.h>
+ #include <linux/module.h>
+ #include <linux/capability.h>
+@@ -712,6 +713,9 @@ void __noreturn do_exit(long code)
+ {
+ 	struct task_struct *tsk = current;
+ 	int group_dead;
++#ifdef CONFIG_SCHED_DEADLINE_UNPRIV
++	const struct cred* cred;
++#endif
+ 
+ 	profile_task_exit(tsk);
+ 	kcov_task_exit(tsk);
+@@ -756,6 +760,15 @@ void __noreturn do_exit(long code)
+ 		preempt_count_set(PREEMPT_ENABLED);
+ 	}
+ 
++#ifdef CONFIG_SCHED_DEADLINE_UNPRIV
++	if (unlikely(current->policy == SCHED_DEADLINE)) {
++		u64 bw = tsk->dl.dl_bw;
++		cred = get_task_cred(tsk);
++		reclaim_bw(cred, bw);
++		put_cred(cred);
++	}
++#endif	/* CONFIG_SCHED_DEADLINE_UNPRIV */
++
+ 	/* sync mm's RSS info before statistics gathering */
+ 	if (tsk->mm)
+ 		sync_mm_rss(tsk->mm);
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 0c00d146e..bf9030e9c 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -4757,12 +4757,103 @@ static bool check_same_owner(struct task_struct *p)
+ 	return match;
+ }
+ 
++#ifdef CONFIG_SCHED_DEADLINE_UNPRIV
++int try_reserve_bw(const struct cred *cred, u64 bw, u64 bw_limit)
++{
++	struct group_info *group_info;
++	unsigned int uid;
++	int g, ret, retval = 0;
++	struct dl_domain_cum_bw cur_bw;
++	bool user_found = false, group_found = false;
++
++	uid = cred->uid.val;
++	group_info = cred->group_info;
++
++	mutex_lock(&dl_user_cum_bw_tree_mtx);
++	mutex_lock(&dl_group_cum_bw_tree_mtx);
++
++	/* Check if user cumulative bw is within limits */
++	ret = dl_get_domain_bw(DL_USER_BW_TYPE, uid, &cur_bw);
++	if (ret == 0) {
++		if (cur_bw.reserved > 0) {  // one rule applies
++			user_found = true;
++			if (cur_bw.used + bw > cur_bw.reserved) {
++				retval = -EPERM;
++				goto out_unlock;
++			}
++		}
++	} else {
++		dl_set_domain_bw_lim(DL_USER_BW_TYPE, uid, bw_limit);
++		if ((bw_limit == 0) || (bw > bw_limit)) {
++			retval = -EPERM;
++			goto out_unlock;
++		} else
++			user_found = true;
++	}
++
++	/* Check if the cum_bw of explicitly set groups is within limits */
++	for (g = 0; g < group_info->ngroups; g++) {
++		ret = dl_get_domain_bw(DL_GROUP_BW_TYPE,
++				       group_info->gid[g].val, &cur_bw);
++		if (ret == 0) {
++			group_found = true;
++			if (cur_bw.used + bw > cur_bw.reserved) {
++				retval = -EPERM;
++				goto out_unlock;
++			}
++		}
++	}
++
++	/* Allow if a rule exists for at least the user or a group, else deny */
++	if (!user_found && !group_found) {
++		retval = -EPERM;
++		goto out_unlock;
++	}
++
++	/* Record the bandwidth usage */
++	dl_add_domain_bw(DL_USER_BW_TYPE, uid, bw);
++	for (g = 0; g < group_info->ngroups; g++) {
++		dl_add_domain_bw(DL_GROUP_BW_TYPE, group_info->gid[g].val, bw);
++	}
++	retval = 0;
++
++out_unlock:
++	mutex_unlock(&dl_group_cum_bw_tree_mtx);
++	mutex_unlock(&dl_user_cum_bw_tree_mtx);
++
++	return retval;
++}
++
++void reclaim_bw(const struct cred *cred, u64 bw)
++{
++	struct group_info *group_info;
++	unsigned int uid;
++	int g;
++
++	uid = cred->uid.val;
++	group_info = cred->group_info;
++
++	mutex_lock(&dl_user_cum_bw_tree_mtx);
++	mutex_lock(&dl_group_cum_bw_tree_mtx);
++
++	/* Free the bandwidth */
++	dl_sub_domain_bw(DL_USER_BW_TYPE, uid, bw);
++	for (g = 0; g < group_info->ngroups; g++) {
++		dl_sub_domain_bw(DL_GROUP_BW_TYPE, group_info->gid[g].val, bw);
++	}
++
++	mutex_unlock(&dl_group_cum_bw_tree_mtx);
++	mutex_unlock(&dl_user_cum_bw_tree_mtx);
++}
++#endif	/* CONFIG_SCHED_DEADLINE_UNPRIV */
++
+ static int __sched_setscheduler(struct task_struct *p,
+ 				const struct sched_attr *attr,
+ 				bool user, bool pi)
+ {
+-	int newprio = dl_policy(attr->sched_policy) ? MAX_DL_PRIO - 1 :
+-		      MAX_RT_PRIO - 1 - attr->sched_priority;
++	int newprio = dl_policy(attr->sched_policy) ?
++			      MAX_DL_PRIO - 1 :
++			      MAX_RT_PRIO - 1 - attr->sched_priority;
+ 	int retval, oldprio, oldpolicy = -1, queued, running;
+ 	int new_effective_prio, policy = attr->sched_policy;
+ 	const struct sched_class *prev_class;
+@@ -4770,6 +4861,7 @@ static int __sched_setscheduler(struct task_struct *p,
+ 	int reset_on_fork;
+ 	int queue_flags = DEQUEUE_SAVE | DEQUEUE_MOVE | DEQUEUE_NOCLOCK;
+ 	struct rq *rq;
++	const struct cred *cred;
+ 
+ 	/* The pi code expects interrupts enabled */
+ 	BUG_ON(pi && in_interrupt());
+@@ -4793,8 +4885,8 @@ static int __sched_setscheduler(struct task_struct *p,
+ 	 * 1..MAX_USER_RT_PRIO-1, valid priority for SCHED_NORMAL,
+ 	 * SCHED_BATCH and SCHED_IDLE is 0.
+ 	 */
+-	if ((p->mm && attr->sched_priority > MAX_USER_RT_PRIO-1) ||
+-	    (!p->mm && attr->sched_priority > MAX_RT_PRIO-1))
++	if ((p->mm && attr->sched_priority > MAX_USER_RT_PRIO - 1) ||
++	    (!p->mm && attr->sched_priority > MAX_RT_PRIO - 1))
+ 		return -EINVAL;
+ 	if ((dl_policy(policy) && !__checkparam_dl(attr)) ||
+ 	    (rt_policy(policy) != (attr->sched_priority != 0)))
+@@ -4812,7 +4904,7 @@ static int __sched_setscheduler(struct task_struct *p,
+ 
+ 		if (rt_policy(policy)) {
+ 			unsigned long rlim_rtprio =
+-					task_rlimit(p, RLIMIT_RTPRIO);
++				task_rlimit(p, RLIMIT_RTPRIO);
+ 
+ 			/* Can't set/change the rt policy: */
+ 			if (policy != p->policy && !rlim_rtprio)
+@@ -4824,91 +4916,140 @@ static int __sched_setscheduler(struct task_struct *p,
+ 				return -EPERM;
+ 		}
+ 
+-		 /*
+-		  * Can't set/change SCHED_DEADLINE policy at all for now
+-		  * (safest behavior); in the future we would like to allow
+-		  * unprivileged DL tasks to increase their relative deadline
+-		  * or reduce their runtime (both ways reducing utilization)
+-		  */
++		/*
++		 * Treat SCHED_IDLE as nice 20. Only allow a switch to
++		 * SCHED_NORMAL if the RLIMIT_NICE would normally permit it.
++		 */
++		if (task_has_idle_policy(p) && !idle_policy(policy)) {
++			if (!can_nice(p, task_nice(p)))
++				return -EPERM;
++		}
++
++#ifndef CONFIG_SCHED_DEADLINE_UNPRIV
++		/*
++		 * Disallow SCHED_DEADLINE control for unprivileged domains
++		 */
++		if (dl_policy(policy))
++			return -EPERM;
++#else
++		/*
++		 * Allow unprivileged tasks to set/change SCHED_DEADLINE 
++		 * policy within rlimits (runtime, period, dl, bandwidth)
++		 */
+ 		if (dl_policy(policy)) {
+-			printk("In __sched_setscheduler\n");
+-			unsigned long rlim_runtime =
+-				task_rlimit(p, RLIMIT_RUNTIME);
+-			unsigned long rlim_period_min =
+-				task_rlimit(p, RLIMIT_PERIOD_MIN);
+-			unsigned long rlim_period_max =
+-				task_rlimit(p, RLIMIT_PERIOD_MAX);
+-			unsigned long rlim_deadline_min =
+-				task_rlimit(p, RLIMIT_DEADLINE_MIN);
+-			unsigned long rlim_deadline_max =
+-				task_rlimit(p, RLIMIT_DEADLINE_MAX);
+-			unsigned long rlim_bandwidth =
+-				task_rlimit(p, RLIMIT_BANDWIDTH);
+-
+-			u64 new_runtime = attr->sched_runtime;
+-			u64 new_period = attr->sched_period ?:
+-						attr->sched_deadline;
+-			u64 new_deadline = attr->sched_deadline;
+-			u64 new_bw = to_ratio(new_period, new_runtime);
++			u64 rlim_runtime, rlim_period_min, rlim_period_max,
++				rlim_deadline_min, rlim_deadline_max,
++				rlim_bandwidth, rlim_cum_bandwidth;
++			u64 new_runtime, new_period, new_deadline, new_bw;
++
++			rlim_runtime = task_rlimit(p, RLIMIT_RUNTIME);
++			rlim_period_min = task_rlimit(p, RLIMIT_PERIOD_MIN);
++			rlim_period_max = task_rlimit(p, RLIMIT_PERIOD_MAX);
++			rlim_deadline_min = task_rlimit(p, RLIMIT_DEADLINE_MIN);
++			rlim_deadline_max = task_rlimit(p, RLIMIT_DEADLINE_MAX);
++			rlim_bandwidth = task_rlimit(p, RLIMIT_BANDWIDTH);
++			rlim_cum_bandwidth =
++				task_rlimit(p, RLIMIT_CUM_BANDWIDTH);
++
++			new_runtime = attr->sched_runtime;
++			new_period = attr->sched_period ?: attr->sched_deadline;
++			new_deadline = attr->sched_deadline;
++			new_bw = to_ratio(new_period, new_runtime);
+ 
+ 			if (task_has_dl_policy(p)) {
+ 				struct sched_dl_entity *dl_se = &p->dl;
+ 				u64 old_runtime = dl_se->dl_runtime;
+ 				u64 old_deadline = dl_se->dl_deadline;
+ 				u64 old_period = dl_se->dl_period;
++				u64 old_bw;
++				old_bw = to_ratio(old_period, old_runtime);
+ 
+-				/* Check runtime: */
++				/* Check runtime */
+ 				if (new_runtime > old_runtime &&
+ 				    new_runtime > rlim_runtime) {
+-					printk("Invalid runtime\n");
++					printk(KERN_NOTICE
++						"Invalid runtime\n");
+ 					return -EPERM;
+ 				}
+ 
+-				/* Check deadline range: */
++				/* Check deadline range */
+ 				if ((new_deadline > old_deadline &&
+-				    new_deadline > rlim_deadline_max) ||
++				     new_deadline > rlim_deadline_max) ||
+ 				    (new_deadline < old_deadline &&
+-				    new_deadline < rlim_deadline_min)) {
+-					printk("Invalid deadline\n");
++				     new_deadline < rlim_deadline_min)) {
++					printk(KERN_NOTICE
++						"Invalid deadline\n");
+ 					return -EPERM;
+ 				}
+ 
+-				/* Check period range: */
++				/* Check period range */
+ 				if ((new_period > old_period &&
+-				    new_period > rlim_period_max) ||
++				     new_period > rlim_period_max) ||
+ 				    (new_period < old_period &&
+-				    new_period < rlim_period_min)) {
+-					printk("Invalid period\n");
++				     new_period < rlim_period_min)) {
++					printk(KERN_NOTICE
++						"Invalid period\n");
+ 					return -EPERM;
+ 				}
+ 
+-				/* Check bandwidth: */
+-				u64 old_bw = to_ratio(old_period, old_runtime);
+-				if (new_bw > old_bw &&
+-				    new_bw > rlim_bandwidth) {
+-					printk("Invalid bandwidth\n");
++				/* Check bandwidth */
++				if (new_bw > rlim_bandwidth) {
++					printk(KERN_NOTICE
++						"Bandwidth lim exceeded\n");
++					return -EPERM;
++				} else if (new_bw > old_bw) {
++					cred = get_task_cred(p);
++					retval = try_reserve_bw(cred,
++							new_bw - old_bw,
++							rlim_cum_bandwidth);
++					put_cred(cred);
++					if (retval != 0) {
++					    printk(KERN_NOTICE
++						"Cumulative bw lim exceeded\n");
++					    return -EPERM;
++					}
++				} else if (new_bw < old_bw) {
++					cred = get_task_cred(p);
++					reclaim_bw(cred, old_bw - new_bw);
++					put_cred(cred);
++				}
++			} else {
++				/* Check runtime, period, deadline and bandwidth */
++				if (new_runtime > rlim_runtime) {
++					printk(KERN_NOTICE
++						"Runtime limits exceeded\n");
++					return -EPERM;
++				}
++				if (new_period < rlim_period_min ||
++				    new_period > rlim_period_max) {
++					printk(KERN_NOTICE
++						"Period limits exceeded\n");
++					return -EPERM;
++				}
++				if (new_deadline < rlim_deadline_min ||
++				    new_deadline > rlim_deadline_max) {
++					printk(KERN_NOTICE
++						"Deadline limits exceeded\n");
++					return -EPERM;
++				}
++				if (new_bw > rlim_bandwidth) {
++					printk(KERN_NOTICE
++						"Bandwidth limits exceeded\n");
++					return -EPERM;
++				}
++				/* Check cumulative bandwidth */
++				cred = get_task_cred(p);
++				retval = try_reserve_bw(cred, new_bw,
++						rlim_cum_bandwidth);
++				put_cred(cred);
++				if (retval) {
++					printk(KERN_NOTICE
++						"Cumulative bandwidth limits exceeded\n");
+ 					return -EPERM;
+ 				}
+ 			}
+-			else if (new_runtime > rlim_runtime ||
+-				 new_period < rlim_period_min ||
+-				 new_period > rlim_period_max ||
+-				 new_deadline < rlim_deadline_min ||
+-				 new_deadline > rlim_deadline_max ||
+-				 new_bw > rlim_bandwidth) {
+-				printk("Limits exceeded\n");
+-				return -EPERM;
+-			}
+-		}
+-
+-		/*
+-		 * Treat SCHED_IDLE as nice 20. Only allow a switch to
+-		 * SCHED_NORMAL if the RLIMIT_NICE would normally permit it.
+-		 */
+-		if (task_has_idle_policy(p) && !idle_policy(policy)) {
+-			if (!can_nice(p, task_nice(p)))
+-				return -EPERM;
+ 		}
++#endif	/* CONFIG_SCHED_DEADLINE_UNPRIV */
+ 
+ 		/* Can't change other user's priorities: */
+ 		if (!check_same_owner(p))
+@@ -5027,6 +5168,23 @@ static int __sched_setscheduler(struct task_struct *p,
+ 		goto unlock;
+ 	}
+ 
++#ifdef CONFIG_SCHED_DEADLINE_UNPRIV
++	/*
++	 * If setscheduling out of SCHED_DEADLINE we need to free the
++	 * used bandwidth.
++	 * */
++	if (dl_policy(p->policy) && !dl_policy(policy)) {
++		struct sched_dl_entity *dl_se = &p->dl;
++		u64 old_runtime = dl_se->dl_runtime;
++		u64 old_period = dl_se->dl_period;
++		u64 old_bw;
++		old_bw = to_ratio(old_period, old_runtime);
++		cred = get_task_cred(p);
++		reclaim_bw(cred, old_bw);
++		put_cred(cred);
++	}
++#endif /* CONFIG_SCHED_DEADLINE_UNPRIV */
++
+ 	p->sched_reset_on_fork = reset_on_fork;
+ 	oldprio = p->prio;
+ 
+diff --git a/kernel/sched/deadline.c b/kernel/sched/deadline.c
+index 43323f875..6597c7afa 100644
+--- a/kernel/sched/deadline.c
++++ b/kernel/sched/deadline.c
+@@ -20,6 +20,11 @@
+ 
+ struct dl_bandwidth def_dl_bandwidth;
+ 
++RADIX_TREE(dl_user_cum_bw_tree, GFP_KERNEL);
++RADIX_TREE(dl_group_cum_bw_tree, GFP_KERNEL);
++DEFINE_MUTEX(dl_user_cum_bw_tree_mtx);
++DEFINE_MUTEX(dl_group_cum_bw_tree_mtx);
++
+ static inline struct task_struct *dl_task_of(struct sched_dl_entity *dl_se)
+ {
+ 	return container_of(dl_se, struct task_struct, dl);
+@@ -2789,3 +2794,139 @@ void print_dl_stats(struct seq_file *m, int cpu)
+ 	print_dl_rq(m, cpu, &cpu_rq(cpu)->dl);
+ }
+ #endif /* CONFIG_SCHED_DEBUG */
++
++#ifdef CONFIG_SCHED_DEADLINE_UNPRIV
++/**
++ * dl_get_domain_bw - Get the current dl bandwidth of a domain
++ *
++ * @ dtype:     type of domain (user/group)
++ * @ id:        id of the domain
++ * @ ret:       returned bandwidth info
++ */
++int dl_get_domain_bw(int dtype, unsigned int id, struct dl_domain_cum_bw *ret)
++{
++	struct radix_tree_root *tree;
++	struct dl_domain_cum_bw *dcbw;
++
++	if (dtype == DL_USER_BW_TYPE)
++		tree = &dl_user_cum_bw_tree;
++	else if (dtype == DL_GROUP_BW_TYPE)
++		tree = &dl_group_cum_bw_tree;
++	else
++		BUG();
++
++	dcbw = radix_tree_lookup(tree, id);
++	if (dcbw == NULL)
++		return -1;
++
++	*ret = *dcbw;
++	return 0;
++}
++
++/**
++ * dl_set_domain_bw_lim - Set dl bandwidth limit for a domain
++ *
++ * @ dtype:     type of domain (user/group)
++ * @ id:        id of the domain
++ * @ bw_lim:    limit (max bandwidth) to set
++ */
++int dl_set_domain_bw_lim(int dtype, unsigned int id, u64 bw_lim)
++{
++	struct radix_tree_root *tree;
++	struct dl_domain_cum_bw *dcbw;
++	int ret;
++
++	if (dtype == DL_USER_BW_TYPE)
++		tree = &dl_user_cum_bw_tree;
++	else if (dtype == DL_GROUP_BW_TYPE)
++		tree = &dl_group_cum_bw_tree;
++	else
++		BUG();
++
++	dcbw = radix_tree_lookup(tree, id);
++	if (dcbw == NULL) {
++		dcbw = kzalloc(sizeof(*dcbw), GFP_KERNEL);
++		if (!dcbw) {
++			printk(KERN_ERR
++			       "No memory to allocate cum_bw element\n");
++			return -ENOMEM;
++		}
++		ret = radix_tree_insert(tree, id, dcbw);
++		if (ret == -ENOMEM) {
++			printk(KERN_ERR
++			       "No memory to allocate radix tree element\n");
++			return -ENOMEM;
++		}
++		BUG_ON(ret == -EEXIST);
++		dcbw->reserved = bw_lim;
++		dcbw->used = 0;
++	} else {	// limit already defined
++		if (bw_lim < dcbw->used)
++			return -EPERM;
++		dcbw->reserved = bw_lim;
++	}
++	return 0;
++}
++
++/**
++ * dl_add_domain_bw - Manage dl bandwidth increment for a domain
++ *
++ * @ dtype:     type of domain (user/group)
++ * @ id:        id of the domain
++ * @ bw:        amount of bandwidth to add
++ */
++int dl_add_domain_bw(int dtype, unsigned int id, u64 bw)
++{
++	struct radix_tree_root *tree;
++	struct dl_domain_cum_bw *dcbw;
++
++	if (dtype == DL_USER_BW_TYPE)
++		tree = &dl_user_cum_bw_tree;
++	else if (dtype == DL_GROUP_BW_TYPE)
++		tree = &dl_group_cum_bw_tree;
++	else
++		BUG();
++
++	dcbw = radix_tree_lookup(tree, id);
++	if (dcbw == NULL)
++		return -1;
++
++	printk(KERN_DEBUG "Increasing dl bw of %s %d from %lld to %lld\n", 
++		(dtype == DL_USER_BW_TYPE) ? "UID" : "GID", id,
++	        dcbw->used, dcbw->used + bw);
++	dcbw->used += bw;
++
++	return 0;
++}
++
++/**
++ * dl_sub_domain_bw - Manage dl bandwidth decrement for a domain
++ *
++ * @ dtype:     type of domain (user/group)
++ * @ id:        id of the domain
++ * @ bw:        amount of bandwidth to remove
++ */
++int dl_sub_domain_bw(int dtype, unsigned int id, u64 bw)
++{
++	struct radix_tree_root *tree;
++	struct dl_domain_cum_bw *dcbw;
++
++	if (dtype == DL_USER_BW_TYPE)
++		tree = &dl_user_cum_bw_tree;
++	else if (dtype == DL_GROUP_BW_TYPE)
++		tree = &dl_group_cum_bw_tree;
++	else
++		BUG();
++
++	dcbw = radix_tree_lookup(tree, id);
++	if (dcbw == NULL)
++		return -1;
++
++	printk(KERN_DEBUG "Decreasing dl bw of %s %d from %lld to %lld\n",
++		(dtype == DL_USER_BW_TYPE) ? "UID" : "GID", id,
++	       dcbw->used, dcbw->used - bw);
++	dcbw->used -= bw;
++
++	return 0;
++}
++#endif	/* CONFIG_SCHED_DEADLINE_UNPRIV */
+diff --git a/kernel/sys.c b/kernel/sys.c
+index f78abd2b1..3404c194c 100644
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -57,6 +57,7 @@
+ #include <linux/sched/coredump.h>
+ #include <linux/sched/task.h>
+ #include <linux/sched/cputime.h>
++#include <linux/sched/deadline.h>
+ #include <linux/rcupdate.h>
+ #include <linux/uidgid.h>
+ #include <linux/cred.h>
+@@ -147,6 +148,13 @@ int fs_overflowgid = DEFAULT_FS_OVERFLOWGID;
+ EXPORT_SYMBOL(fs_overflowuid);
+ EXPORT_SYMBOL(fs_overflowgid);
+ 
++/*
++ * Selected GID to apply the RLIMIT_GROUP_CUM_BANDWIDTH rlim.
++ * A value of 0 indicates no gid selected (instead of gid 0)
++ */
++
++gid_t sel_grp_cum_bw_gid = 0;
++
+ /*
+  * Returns true if current's euid is same as p's uid or euid,
+  * or has CAP_SYS_NICE to p's user_ns.
+@@ -1535,14 +1543,22 @@ int do_prlimit(struct task_struct *tsk, unsigned int resource,
+ 	if (resource >= RLIM_NLIMITS)
+ 		return -EINVAL;
+ 	if (new_rlim) {
++#ifndef CONFIG_SCHED_DEADLINE_UNPRIV
++		if (new_rlim->rlim_cur > new_rlim->rlim_max)
++			return -EINVAL;
++#else
+ 		if ((resource == RLIMIT_PERIOD_MIN ||
+-		    resource == RLIMIT_DEADLINE_MIN) &&
++		     resource == RLIMIT_DEADLINE_MIN) &&
+ 		    new_rlim->rlim_cur < new_rlim->rlim_max)
+ 			return -EINVAL;
+ 		if ((resource != RLIMIT_PERIOD_MIN &&
+-		    resource != RLIMIT_DEADLINE_MIN) &&
++		     resource != RLIMIT_DEADLINE_MIN) &&
++#ifdef RLIMIT_GROUP_CUM_BW_GID
++		     resource != RLIMIT_GROUP_CUM_BW_GID &&
++#endif
+ 		    new_rlim->rlim_cur > new_rlim->rlim_max)
+ 			return -EINVAL;
++#endif	/* CONFIG_SCHED_DEADLINE_UNPRIV */
+ 		if (resource == RLIMIT_NOFILE &&
+ 				new_rlim->rlim_max > sysctl_nr_open)
+ 			return -EPERM;
+@@ -1560,24 +1576,43 @@ int do_prlimit(struct task_struct *tsk, unsigned int resource,
+ 	if (new_rlim) {
+ 		/* Keep the capable check against init_user_ns until
+ 		   cgroups can contain all limits */
++#ifndef CONFIG_SCHED_DEADLINE_UNPRIV
++		if (new_rlim->rlim_max > rlim->rlim_max &&
++				!capable(CAP_SYS_RESOURCE))
++			retval = -EPERM;
++#else
+ 		if ((resource == RLIMIT_PERIOD_MIN ||
+-		    resource == RLIMIT_DEADLINE_MIN) &&
+-		    new_rlim->rlim_max < rlim->rlim_max &&
+-		    !capable(CAP_SYS_RESOURCE))
++				resource == RLIMIT_DEADLINE_MIN) &&
++				new_rlim->rlim_max < rlim->rlim_max &&
++				!capable(CAP_SYS_RESOURCE))
+ 			retval = -EPERM;
+ 		else if ((resource != RLIMIT_PERIOD_MIN &&
+-			 resource != RLIMIT_DEADLINE_MIN) &&
+-			 new_rlim->rlim_max > rlim->rlim_max &&
++				resource != RLIMIT_DEADLINE_MIN) &&
++#ifdef RLIMIT_GROUP_CUM_BW_GID
++				resource != RLIMIT_GROUP_CUM_BW_GID &&
++#endif
++				new_rlim->rlim_max > rlim->rlim_max &&
+ 				!capable(CAP_SYS_RESOURCE))
+ 			retval = -EPERM;
++#endif	/* CONFIG_SCHED_DEADLINE_UNPRIV */
+ 		if (!retval)
+ 			retval = security_task_setrlimit(tsk, resource, new_rlim);
+ 	}
+ 	if (!retval) {
+ 		if (old_rlim)
+ 			*old_rlim = *rlim;
+-		if (new_rlim)
++		if (new_rlim) {
+ 			*rlim = *new_rlim;
++			if (resource == RLIMIT_GROUP_CUM_BW_GID) {
++				sel_grp_cum_bw_gid = new_rlim->rlim_cur;
++			} else if (resource == RLIMIT_GROUP_CUM_BANDWIDTH) {
++				if (!sel_grp_cum_bw_gid)
++					return -EINVAL;
++				dl_set_domain_bw_lim(DL_GROUP_BW_TYPE,
++						     sel_grp_cum_bw_gid,
++						     new_rlim->rlim_cur);
++			}
++		}
+ 	}
+ 	task_unlock(tsk->group_leader);
+ 
+diff --git a/security/Kconfig b/security/Kconfig
+index 2a1a2d396..94d3c0148 100644
+--- a/security/Kconfig
++++ b/security/Kconfig
+@@ -230,6 +230,21 @@ config STATIC_USERMODEHELPER_PATH
+ 	  If you wish for all usermode helper programs to be disabled,
+ 	  specify an empty string here (i.e. "").
+ 
++config SCHED_DEADLINE_UNPRIV
++	bool "Allow unprivileged access to SCHED_DEADLINE functionalities"
++	default n
++	help
++	  Access to the deadline scheduling policy (SCHED_DEADLINE) is
++	  by default restricted to root users only. With this option,
++	  unprivileged users gain access to these features, according
++	  to a tunable access control policy based on resource limits.
++	  Note that a compatible PAM (Pluggable Authentication Module) 
++	  version is required for this option to work properly.
++
++	  If you wish to allow unprivileged users having access to
++	  SCHED_DEADLINE features, say Y.
++	  If unsure, say N.
++
+ source "security/selinux/Kconfig"
+ source "security/smack/Kconfig"
+ source "security/tomoyo/Kconfig"
+-- 
+2.17.1
+
