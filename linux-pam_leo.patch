@@ -1,4 +1,4 @@
-From 40bd2453e0974e68cbb6443648412aac37bbea0c Mon Sep 17 00:00:00 2001
+From 5d6b3594a5e09f811a92a9ffc95dbbeb77e8e503 Mon Sep 17 00:00:00 2001
 From: Leonardo Lai <leonardo.lai@live.com>
 Date: Sun, 15 Mar 2020 11:04:21 +0100
 Subject: added rlimit for cumulative sched_dl bandwidth
@@ -6,8 +6,8 @@ Subject: added rlimit for cumulative sched_dl bandwidth
 added support for group cumulative bandwidth
 ---
  modules/pam_limits/limits.conf  |  3 ++
- modules/pam_limits/pam_limits.c | 69 +++++++++++++++++++++++++++++----
- 2 files changed, 65 insertions(+), 7 deletions(-)
+ modules/pam_limits/pam_limits.c | 80 ++++++++++++++++++++++++++++++---
+ 2 files changed, 76 insertions(+), 7 deletions(-)
 
 diff --git a/modules/pam_limits/limits.conf b/modules/pam_limits/limits.conf
 index fc2f23e..0842bf1 100644
@@ -24,7 +24,7 @@ index fc2f23e..0842bf1 100644
  #<domain>      <type>  <item>         <value>
  #
 diff --git a/modules/pam_limits/pam_limits.c b/modules/pam_limits/pam_limits.c
-index 9e53447..9388c5d 100644
+index 9e53447..09a0f2c 100644
 --- a/modules/pam_limits/pam_limits.c
 +++ b/modules/pam_limits/pam_limits.c
 @@ -65,13 +65,16 @@
@@ -127,13 +127,31 @@ index 9e53447..9388c5d 100644
      /* one more special case when limiting logins */
      if ((source == LIMITS_DEF_ALL || source == LIMITS_DEF_ALLGROUP)
  		&& (limit_item != LIMIT_LOGIN)) {
-@@ -1048,6 +1099,10 @@ static int setup_limits(pam_handle_t *pamh,
+@@ -736,6 +787,16 @@ process_limit (const pam_handle_t *pamh, int source, const char *lim_type,
+ #endif
+     }
+ 
++#if defined(RLIMIT_GROUP_CUM_BW_GID)
++    if ( (limit_item == RLIMIT_GROUP_CUM_BW_GID) 
++	 || limit_item == RLIMIT_GROUP_CUM_BANDWIDTH) {
++	if (limit_type & LIMIT_SOFT) {
++	    pl->limits[limit_item].limit.rlim_cur = rlimit_value;
++	    pl->limits[limit_item].limit.rlim_max = rlimit_value;
++	    setrlimit(limit_item, &pl->limits[i].limit);
++	}
++    } else
++#endif
+     if ( (limit_item != LIMIT_LOGIN)
+ 	 && (limit_item != LIMIT_NUMSYSLOGINS)
+ 	 && (limit_item != LIMIT_PRI) ) {
+@@ -1048,6 +1109,11 @@ static int setup_limits(pam_handle_t *pamh,
  	if ((i == RLIMIT_PERIOD_MIN || i == RLIMIT_DEADLINE_MIN) &&
  	   pl->limits[i].limit.rlim_cur < pl->limits[i].limit.rlim_max)
              pl->limits[i].limit.rlim_cur = pl->limits[i].limit.rlim_max;
 +#if defined(RLIMIT_GROUP_CUM_BW_GID)
-+	else if (i == RLIMIT_GROUP_CUM_BW_GID)
-+		; // no action to perform in this case
++	else if (i == RLIMIT_GROUP_CUM_BW_GID || 
++		 i == RLIMIT_GROUP_CUM_BANDWIDTH)
++	    continue;
 +#endif
          else if ((i != RLIMIT_PERIOD_MIN && i != RLIMIT_DEADLINE_MIN) &&
  		pl->limits[i].limit.rlim_cur > pl->limits[i].limit.rlim_max)

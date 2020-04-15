@@ -1,4 +1,4 @@
-From 66f5cf3ea28d6fc8949404cd91366f15f9dfbd5a Mon Sep 17 00:00:00 2001
+From 41e76f392e31296c73df05bb4085f0aaa5373433 Mon Sep 17 00:00:00 2001
 From: Leonardo Lai <leonardo.lai@live.com>
 Date: Fri, 13 Mar 2020 18:31:07 +0100
 Subject: defined new rlimit for cumulative bandwdth for dl tasks
@@ -14,9 +14,9 @@ new implementation for groups
  kernel/exit.c                       |  13 ++
  kernel/sched/core.c                 | 284 ++++++++++++++++++++++------
  kernel/sched/deadline.c             | 141 ++++++++++++++
- kernel/sys.c                        |  51 ++++-
+ kernel/sys.c                        |  53 +++++-
  security/Kconfig                    |  15 ++
- 9 files changed, 514 insertions(+), 80 deletions(-)
+ 9 files changed, 516 insertions(+), 80 deletions(-)
 
 diff --git a/fs/proc/base.c b/fs/proc/base.c
 index 7493f8b5d..6b39a12bc 100644
@@ -738,7 +738,7 @@ index 43323f875..6597c7afa 100644
 +}
 +#endif	/* CONFIG_SCHED_DEADLINE_UNPRIV */
 diff --git a/kernel/sys.c b/kernel/sys.c
-index f78abd2b1..3404c194c 100644
+index f78abd2b1..d9d1ef8c0 100644
 --- a/kernel/sys.c
 +++ b/kernel/sys.c
 @@ -57,6 +57,7 @@
@@ -788,7 +788,7 @@ index f78abd2b1..3404c194c 100644
  		if (resource == RLIMIT_NOFILE &&
  				new_rlim->rlim_max > sysctl_nr_open)
  			return -EPERM;
-@@ -1560,24 +1576,43 @@ int do_prlimit(struct task_struct *tsk, unsigned int resource,
+@@ -1560,24 +1576,45 @@ int do_prlimit(struct task_struct *tsk, unsigned int resource,
  	if (new_rlim) {
  		/* Keep the capable check against init_user_ns until
  		   cgroups can contain all limits */
@@ -825,6 +825,7 @@ index f78abd2b1..3404c194c 100644
 -		if (new_rlim)
 +		if (new_rlim) {
  			*rlim = *new_rlim;
++#if defined(CONFIG_SCHED_DEADLINE_UNPRIV) && defined(RLIMIT_GROUP_CUM_BW_GID)
 +			if (resource == RLIMIT_GROUP_CUM_BW_GID) {
 +				sel_grp_cum_bw_gid = new_rlim->rlim_cur;
 +			} else if (resource == RLIMIT_GROUP_CUM_BANDWIDTH) {
@@ -834,6 +835,7 @@ index f78abd2b1..3404c194c 100644
 +						     sel_grp_cum_bw_gid,
 +						     new_rlim->rlim_cur);
 +			}
++#endif /* CONFIG_SCHED_DEADLINE_UNPRIV && RLIMIT_GROUP_CUM_BW_GID */
 +		}
  	}
  	task_unlock(tsk->group_leader);
